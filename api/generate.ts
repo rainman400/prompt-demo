@@ -1,37 +1,64 @@
-declare const process: any; // <-- add this line
+// api/generate.ts
 export const runtime = "edge";
 export const maxDuration = 300;
 
-// Edge runtime doesn’t have `process`, but Vercel injects env automatically.
-// For local testing, fall back to import.meta.env or a global polyfill.
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*", // POC: wide open; lock this down later
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Max-Age": "86400",
+  };
+}
 
-const OPENAI_KEY = process?.env?.OPENAI_API_KEY;
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders() },
+  });
+}
 
 export default async function handler(req: Request) {
+  // ✅ Return preflight immediately—no other code runs first
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders() });
   }
 
-  try {
-    const { prompt } = (await req.json()) as { prompt?: string };
-    if (!prompt) return json({ error: "Missing prompt" }, 400);
+  // Optional: quick ping for GET debugging
+  if (req.method === "GET") {
+    return json({ ok: true, hint: "Use POST with { prompt }" }, 200);
+  }
 
-    if (!OPENAI_KEY) {
-      return json({ error: "Missing OPENAI_API_KEY in env" }, 500);
-    }
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  const reqId = crypto.randomUUID();
+  try {
+    const { prompt } = (await req.json().catch(() => ({}))) as { prompt?: string };
+    if (!prompt) return json({ error: "Missing prompt", reqId }, 400);
+
+    // ⚠️ Read env inside the handler (after OPTIONS) so preflight never trips over it
+    const OPENAI_API_KEY = (globalThis as any).process?.env?.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) return json({ error: "Server missing OPENAI_API_KEY", reqId }, 500);
+
+    // ⏱ hard timeout so request never hangs forever
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
+      signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ model: "gpt-4o-mini", input: prompt }),
-    });
+    }).finally(() => clearTimeout(timeout));
 
     if (!r.ok) {
-      const text = await r.text();
-      return json({ error: text }, 500);
+      const errText = await r.text();
+      return json({ error: errText.slice(0, 2000), reqId }, 500);
     }
 
     const data = await r.json();
@@ -40,23 +67,11 @@ export default async function handler(req: Request) {
       data.output?.[0]?.content?.[0]?.text ??
       JSON.stringify(data);
 
-    return json({ output }, 200);
+    return json({ output, reqId }, 200);
   } catch (e: any) {
-    return json({ error: String(e) }, 500);
+    const name = e?.name || "Error";
+    const msg = e?.message || String(e);
+    const status = name === "AbortError" ? 504 : 500;
+    return json({ error: `${name}: ${msg}`, reqId }, status);
   }
-}
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-  };
-}
-
-function json(obj: any, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders() },
-  });
 }

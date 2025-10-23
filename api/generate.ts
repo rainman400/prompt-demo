@@ -1,41 +1,40 @@
-// api/generate.ts
-export const runtime = "edge";      // run on Edge (no Pro plan required)
-export const maxDuration = 300;     // up to 300s
+declare const process: any; // <-- add this line
+export const runtime = "edge";
+export const maxDuration = 300;
+
+// Edge runtime doesn’t have `process`, but Vercel injects env automatically.
+// For local testing, fall back to import.meta.env or a global polyfill.
+
+const OPENAI_KEY = process?.env?.OPENAI_API_KEY;
 
 export default async function handler(req: Request) {
-  // CORS for your browser demo (tighten later)
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders(),
-    });
+    return new Response(null, { status: 204, headers: corsHeaders() });
   }
 
   try {
-    const { prompt } = await req.json() as { prompt?: string };
-    if (!prompt) {
-      return json({ error: "Missing prompt" }, 400);
+    const { prompt } = (await req.json()) as { prompt?: string };
+    if (!prompt) return json({ error: "Missing prompt" }, 400);
+
+    if (!OPENAI_KEY) {
+      return json({ error: "Missing OPENAI_API_KEY in env" }, 500);
     }
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY!}`,
+        Authorization: `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",     // pick any model you like
-        input: prompt,
-      }),
+      body: JSON.stringify({ model: "gpt-4o-mini", input: prompt }),
     });
 
     if (!r.ok) {
-      const errText = await r.text();
-      return json({ error: errText }, 500);
+      const text = await r.text();
+      return json({ error: text }, 500);
     }
 
     const data = await r.json();
-    // Responses API: safest text extraction fallback chain
     const output =
       data.output_text ??
       data.output?.[0]?.content?.[0]?.text ??
@@ -54,6 +53,7 @@ function corsHeaders() {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
 }
+
 function json(obj: any, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
